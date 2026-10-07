@@ -1,6 +1,6 @@
 # bib
 
-Central BibTeX library for Yumzu's repos. Paperpile writes `references.bib` here through its BibTeX sync. Do not edit it by hand. Paperpile overwrites the file on each sync.
+Central BibTeX library for jovo's repos. Paperpile writes `references.bib` here through its BibTeX sync. Do not edit it by hand. Paperpile overwrites the file on each sync.
 
 ## Use in a project repo
 
