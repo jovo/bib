@@ -1,0 +1,19 @@
+#!/bin/bash
+# Commit and push references.bib after Better BibTeX rewrites it.
+# Run by the launchd agent that bin/install sets up. Safe to run by hand.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+LOCK=.git/autocommit.lock
+mkdir "$LOCK" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK"' EXIT
+# Better BibTeX can write the file in several passes. Wait for it to settle.
+sleep 15
+# Restore Paperpile's convention: braces keep CSL styles from re-casing titles.
+bin/protect-titles references.bib
+git diff --quiet -- references.bib && exit 0
+n=$(grep -c '^@' references.bib || true)
+git add references.bib
+git commit -q -m "Update references from Zotero ($n entries)"
+git pull -q --rebase
+git push -q
+echo "$(date '+%F %T') pushed $(git rev-parse --short HEAD) ($n entries)"

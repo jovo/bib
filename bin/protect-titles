@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Wrap title fields of a BibLaTeX file in double braces, in place.
+
+Usage: protect-titles <file.bib>
+
+Better BibTeX exports titles bare, so CSL styles re-case them and lowercase
+proper nouns. Paperpile's "Preserve title casing" wrapped each title in {{...}}.
+This restores that convention. Running it twice changes nothing.
+"""
+import re
+import sys
+
+FIELDS = 'title|booktitle|journaltitle|maintitle|eventtitle|series|shorttitle'
+FIELD_RE = re.compile(r'^(\s*(?:' + FIELDS + r')\s*=\s*)\{(.*)\},?$', re.I)
+
+
+def balanced(s):
+    depth = 0
+    for c in s:
+        depth += {'{': 1, '}': -1}.get(c, 0)
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def fully_wrapped(value):
+    """True if value is {...} with the outer braces matching each other."""
+    if not (value.startswith('{') and value.endswith('}')):
+        return False
+    depth = 0
+    for i, c in enumerate(value):
+        depth += {'{': 1, '}': -1}.get(c, 0)
+        if depth == 0 and i < len(value) - 1:
+            return False
+    return True
+
+
+def protect(text):
+    out = []
+    for line in text.split('\n'):
+        m = FIELD_RE.match(line)
+        if m and balanced(m.group(2)) and not fully_wrapped(m.group(2)):
+            comma = ',' if line.rstrip().endswith(',') else ''
+            line = f'{m.group(1)}{{{{{m.group(2)}}}}}{comma}'
+        out.append(line)
+    return '\n'.join(out)
+
+
+def main(path):
+    text = open(path, encoding='utf-8').read()
+    new = protect(text)
+    if new != text:
+        open(path, 'w', encoding='utf-8').write(new)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(2)
+    main(sys.argv[1])

@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Add a paper to the Zotero library by DOI or URL and print its citation key.
+
+Usage: addref <DOI, URL, or PMID:n> [...]
+
+Zotero must be running with Better BibTeX. The paper's metadata comes from
+doi.org as RIS and is imported through Zotero's local connector, so Better
+BibTeX assigns the key. A DOI already in the library is not imported again.
+"""
+import html
+import json
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+
+ZOTERO = 'http://127.0.0.1:23119'
+DOI_RE = re.compile(r'10\.\d{4,9}/[^\s"<>]+', re.I)
+PUBMED_RE = re.compile(r'(?:pubmed\.ncbi\.nlm\.nih\.gov/|ncbi\.nlm\.nih\.gov/pubmed/|^pmid:\s*)(\d+)', re.I)
+ARXIV_RE = re.compile(r'arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5}|[a-z\-]+/[0-9]{7})', re.I)
+META_RE = re.compile(
+    r'<meta[^>]+(?:name|property)=["\'](?:citation_doi|dc\.identifier|prism\.doi|bepress_citation_doi)["\'][^>]*>',
+    re.I)
+USER_AGENT = 'addref (mailto:j@progl.ai)'
+
+
+class AddrefError(Exception):
+    pass
+
+
+def clean_doi(doi):
+    doi = urllib.parse.unquote(doi).strip()
+    doi = re.sub(r'^(?:https?://)?(?:dx\.)?doi\.org/', '', doi, flags=re.I)
+    doi = re.sub(r'^doi:\s*', '', doi, flags=re.I)
+    doi = doi.rstrip('.,;)]}')
+    while True:
+        stripped = re.sub(r'(?:\.pdf|\.full|\.abstract|/full|/abstract|/epdf|/pdf)$', '', doi, flags=re.I)
+        if stripped == doi:
+            break
+        doi = stripped
+    if doi.startswith('10.1101/'):
+        doi = re.sub(r'v\d+$', '', doi)  # bioRxiv and medRxiv version suffix
+    return doi.lower()
+
+
+def doi_from_text(text):
+    """Return the DOI in a DOI string or URL, or None."""
+    m = ARXIV_RE.search(text)
+    if m:
+        return '10.48550/arxiv.' + re.sub(r'v\d+$', '', m.group(1)).lower()
+    m = DOI_RE.search(urllib.parse.unquote(text))
+    return clean_doi(m.group(0)) if m else None
+
+
+def doi_from_html(page):
+    """Return the DOI declared in a page's citation metadata, or None."""
+    for tag in META_RE.findall(page):
+        m = re.search(r'content=["\']([^"\']+)["\']', tag, re.I)
+        if m:
+            doi = doi_from_text(html.unescape(m.group(1)))
+            if doi:
+                return doi
+    return None
+
+
+def http(url, data=None, headers=None, timeout=60):
+    req = urllib.request.Request(url, data=data, headers={'User-Agent': USER_AGENT, **(headers or {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode('utf-8', 'replace')
+
+
+def doi_from_pubmed(pmid):
+    url = f'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={pmid}&retmode=json'
+    ids = json.loads(http(url))['result'].get(pmid, {}).get('articleids', [])
+    return next((clean_doi(a['value']) for a in ids if a.get('idtype') == 'doi'), None)
+
+
+def resolve_doi(arg):
+    doi = doi_from_text(arg)
+    if doi:
+        return doi
+    m = PUBMED_RE.search(arg.strip())
+    if m:
+        doi = doi_from_pubmed(m.group(1))
+        if not doi:
+            raise AddrefError(f'PubMed has no DOI for PMID {m.group(1)}')
+        return doi
+    if not re.match(r'https?://', arg):
+        raise AddrefError(f'not a DOI or URL: {arg}')
+    try:
+        doi = doi_from_html(http(arg, headers={'Accept': 'text/html'}))
+    except urllib.error.URLError as e:
+        raise AddrefError(f'could not load {arg}: {e}')
+    if not doi:
+        raise AddrefError(f'no DOI found on {arg}')
+    return doi
+
+
+def library_dois(bib):
+    """Map lowercase DOI to citation key for each entry in a BibLaTeX string."""
+    out = {}
+    for m in re.finditer(r'^@\w+\{([^,\s]+),(.*?)(?=^@|\Z)', bib, re.M | re.S):
+        d = re.search(r'^\s*doi\s*=\s*[{"]([^}"]+)[}"]', m.group(2), re.M | re.I)
+        if d:
+            out[clean_doi(d.group(1))] = m.group(1)
+    return out
+
+
+def zotero_running():
+    try:
+        return 'Zotero is running' in http(ZOTERO + '/connector/ping', timeout=5)
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def current_library():
+    return http(ZOTERO + '/better-bibtex/export/library?/1/library.biblatex', timeout=300)
+
+
+def import_doi(doi):
+    try:
+        ris = http('https://doi.org/' + urllib.parse.quote(doi, safe='/'),
+                   headers={'Accept': 'application/x-research-info-systems'})
+    except urllib.error.HTTPError as e:
+        raise AddrefError(f'doi.org has no metadata for {doi} (HTTP {e.code})')
+    if not ris.lstrip().startswith('TY  -'):
+        raise AddrefError(f'doi.org returned no RIS record for {doi}')
+    url = f'{ZOTERO}/connector/import?session=addref-{uuid.uuid4().hex}'
+    resp = json.loads(http(url, data=ris.encode('utf-8'), timeout=120, headers={
+        'Content-Type': 'application/x-research-info-systems',
+        'X-Zotero-Connector-API-Version': '3'}))
+    if not isinstance(resp, list) or not resp:
+        raise AddrefError(f'Zotero did not import {doi}: {resp}')
+    return resp[0].get('citationKey'), resp[0].get('title', '')
+
+
+def main(args):
+    if not args:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    if not zotero_running():
+        print('addref: Zotero is not running. Open Zotero and try again.', file=sys.stderr)
+        return 1
+    known = library_dois(current_library())
+    status = 0
+    for arg in args:
+        try:
+            doi = resolve_doi(arg)
+            if doi in known:
+                print(f'{known[doi]}\talready in library\t{doi}')
+                continue
+            key, title = import_doi(doi)
+            known[doi] = key
+            print(f'{key}\tadded\t{doi}\t{title}')
+        except AddrefError as e:
+            print(f'addref: {e}', file=sys.stderr)
+            status = 1
+    return status
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
