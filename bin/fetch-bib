@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Provide the central bibliography at $1 (default build/references.bib).
+# Canonical copy: bin/fetch-bib in github.com/jovo/bib. Projects copy it to
+# build/fetch-bib.sh and run it from their Makefile. Update copies from there.
+# Zotero exports the library to github.com/jovo/bib. Add references there,
+# never to this copy, which is untracked and overwritten here.
+#
+# 1. If the bib repo is cloned locally (BIB_DIR, default ~/github/bib), link to
+#    its references.bib. That is the file Zotero exports to, so nothing is
+#    downloaded.
+# 2. Otherwise download from GitHub, but only when the file changed since the
+#    last download (an ETag check, a few bytes when nothing changed).
+# Offline, the cached copy is kept.
+set -euo pipefail
+OUT="${1:-build/references.bib}"
+LOCAL="${BIB_DIR:-$HOME/github/bib}/references.bib"
+URL=https://raw.githubusercontent.com/jovo/bib/main/references.bib
+
+if [ -f "$LOCAL" ]; then
+  [ "$(readlink "$OUT" 2>/dev/null)" = "$LOCAL" ] || ln -sfn "$LOCAL" "$OUT"
+  exit 0
+fi
+
+[ -L "$OUT" ] && rm -f "$OUT"  # a link left from a machine with the local clone
+ETAG="$OUT.etag"
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+[ -f "$OUT" ] || rm -f "$ETAG"  # no cached copy: force a full download
+if curl -fsSL --max-time 60 --etag-compare "$ETAG" --etag-save "$ETAG" -o "$TMP" "$URL"; then
+  if [ -s "$TMP" ]; then
+    cmp -s "$TMP" "$OUT" || { cp "$TMP" "$OUT"; chmod 644 "$OUT"; }
+  fi  # empty body: unchanged since the last download
+elif [ -f "$OUT" ]; then
+  echo "fetch-bib: download failed, using cached $OUT" >&2
+else
+  echo "fetch-bib: download failed and no cached $OUT" >&2
+  exit 1
+fi
